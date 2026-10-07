@@ -86,7 +86,7 @@ grep -ohE '(src|prisma|tests)/[A-Za-z0-9_./-]+\.(ts|prisma)|package\.json' -r do
 
 ## Iterações e ajustes
 
-Foram **4 iterações principais** depois da primeira geração.
+Foram **5 iterações principais** depois da primeira geração.
 
 1. **"5 tentativas" não fechava com "quase 15 horas".** A primeira versão do ADR-003 dizia "5 tentativas" e parava aí. Ao montar a tabela de retry do FDD, a conta não fechava: se a 1ª das 5 tentativas é o envio inicial, sobram só 4 intervalos (1m+5m+30m+2h ≈ 2h36m), e não os "quase 15 horas" que o Diego citou em [09:17]. A única leitura coerente é 1 envio inicial + 5 retentativas (14h36m). Registrei essa interpretação explicitamente no ADR-003 e no FDD, marcada para confirmação, em vez de escolher em silêncio.
 
@@ -95,6 +95,13 @@ Foram **4 iterações principais** depois da primeira geração.
 3. **Observabilidade inventada foi rebaixada a hipótese.** O FDD exige métricas, logs e tracing, mas a reunião só fala de Pino e de auditoria do replay, e o projeto não tem biblioteca de métricas nem de tracing. Em vez de "adicionar OpenTelemetry e Prometheus", que contraria o ADR-006 (reuso, nada novo), a seção ficou com logs reais (Pino, `requestId` existente), métricas derivadas das tabelas e correlação por `event_id`, tudo marcado como **[HIPÓTESE]** e listado no tracker.
 
 4. **Inconsistência de modelo encontrada na revisão.** O FDD propunha DELETE como remoção lógica via `active = false`, o mesmo campo do `PATCH active=false`. Com isso, um webhook pausado e um removido ficariam indistinguíveis. Foi adicionado `deletedAt`, com a semântica de cada operação descrita.
+
+5. **Auditoria contra os critérios de aceite e as dicas.** Pedi à IA para conferir a entrega item por item e ela encontrou problemas que a primeira versão escondia:
+   - **Hipóteses dispensáveis:** havia 99,9% de disponibilidade no PRD (default do prompt, não da reunião), uma contingência inventada para a Atlas, dois códigos de erro sem origem (`WEBHOOK_ROTATION_IN_PROGRESS`, `WEBHOOK_DEAD_LETTER_ALREADY_REPLAYED`) e um limite de 4 KB arbitrário. Tudo foi removido ou trocado por comportamento derivado da transcrição. Exemplo: o replay só vale para eventos em `FAILED`, e uma nova falha faz upsert na DLQ.
+   - **Riscos duplicados:** os mesmos riscos apareciam no PRD, no RFC e no FDD. Cada documento ficou com os da sua altura: negócio no PRD, arquitetura no RFC, implementação no FDD.
+   - **Títulos implícitos:** seções obrigatórias que estavam como texto simples ("Metadados" no RFC; "Problema e motivação" e "Público-alvo e cenários de uso" no PRD) viraram títulos.
+   - **Exemplos vazios:** os exemplos de request `{}` dos GET e DELETE viraram requisições HTTP reais.
+   - **Tracker:** vínculos fracos foram trocados por fontes melhores. `WEBHOOK_CUSTOMER_NOT_FOUND`, por exemplo, passou a apontar para a checagem que já existe em `order.service.ts`. A tabela de hipóteses passou a usar o mesmo formato de 6 colunas.
 
 Ajustes menores: o script de verificação confirmou que todos os timestamps citados existem com o falante correto. Também mostrou que os únicos caminhos "inexistentes" eram os arquivos novos propostos (`src/worker.ts`, `src/modules/webhooks/*`), que passaram a aparecer rotulados como "a criar". O RFC ficou sem schemas, payloads e matriz de erros, que ficam só no FDD, para não duplicar níveis.
 

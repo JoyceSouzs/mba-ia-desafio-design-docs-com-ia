@@ -4,7 +4,7 @@ Versão: 1.0
 Data: 2026-10-07
 Responsável: Marcos (Product Manager)
 
-> Documentos ligados: [RFC](RFC.md) (proposta técnica), [ADRs](adrs/) (decisões), [FDD](FDD.md) (implementação), [Tracker](TRACKER.md) (origem de cada item). Itens marcados **[HIPÓTESE]** não foram definidos na reunião e estão explícitos para validação.
+> Documentos ligados: [RFC](RFC.md) (proposta técnica e riscos de arquitetura), [ADRs](adrs/) (decisões), [FDD](FDD.md) (implementação e riscos técnicos), [Tracker](TRACKER.md) (origem de cada item). Itens marcados **[HIPÓTESE]** não foram definidos na reunião e estão explícitos para validação.
 
 ---
 
@@ -15,6 +15,22 @@ Clientes B2B do OMS precisam saber quando o status dos seus pedidos muda sem ter
 ---
 
 ### Contexto e problema
+
+#### Contexto da feature
+
+Onde essa feature será implantada
+- No OMS existente (Node.js, TypeScript, Express, Prisma, MySQL), como novo módulo `src/modules/webhooks` seguindo o padrão dos demais ([09:27] Bruno) e um novo processo worker que roda separado da API, no mesmo banco ([09:11] Diego, [09:11] Larissa)
+- Hoje a aplicação não tem eventos, filas nem webhooks; a mudança de status de pedidos acontece em `src/modules/orders/order.service.ts`
+- A notificação é só de saída: a plataforma envia, o cliente recebe ([09:02] Marcos, [09:03] Sofia)
+
+#### Problema e motivação
+
+Problemas priorizados
+- Clientes fazem polling em `GET /orders` para descobrir mudanças de status. Impacto: integração lenta e cara para o cliente. Prioridade: alta ([09:00] Marcos)
+- Risco comercial: a Atlas Comercial indicou que pode migrar para um concorrente se a funcionalidade não for entregue até o fim do trimestre, com pedido de entrega até o fim de novembro. Impacto: perda de cliente. Prioridade: alta ([09:00] Marcos, [09:45] Marcos)
+- O OMS não possui nenhum mecanismo de eventos ou notificações. Impacto: nenhuma alternativa disponível ao polling. Prioridade: alta (`src/app.ts`)
+
+#### Público-alvo e cenários de uso
 
 Público-alvo
 - Clientes B2B que integram com o OMS via API, começando por Atlas Comercial, MaxDistribuição e Nova Cargo ([09:00] Marcos)
@@ -29,17 +45,9 @@ Cenários de uso chave
 - O cliente consulta os últimos 100 envios para investigar uma notificação que não processou ([09:34] Marcos)
 - Um ADMIN reprocessa uma notificação que esgotou as tentativas depois que o cliente corrigiu seu endpoint ([09:18] Diego)
 
-Onde essa feature será implantada
-- No OMS existente (Node.js, TypeScript, Express, Prisma, MySQL), como novo módulo `src/modules/webhooks` seguindo o padrão dos demais ([09:27] Bruno) e um novo processo worker que roda separado da API, no mesmo banco ([09:11] Diego, [09:11] Larissa)
-
-Problemas priorizados
-- Clientes fazem polling em `GET /orders` para descobrir mudanças de status. Impacto: integração lenta e cara para o cliente. Prioridade: alta ([09:00] Marcos)
-- Risco comercial: a Atlas Comercial indicou que pode migrar para um concorrente se a funcionalidade não for entregue até o fim do trimestre, com pedido de entrega até o fim de novembro. Impacto: perda de cliente. Prioridade: alta ([09:00] Marcos, [09:45] Marcos)
-- O OMS não possui nenhum mecanismo de eventos ou notificações. Impacto: nenhuma alternativa disponível ao polling. Prioridade: alta (código em `src/`)
-
 ---
 
-### Objetivos e métricas
+### Objetivos e métricas de sucesso
 
 | Objetivo | Métrica | Meta |
 | --- | --- | --- |
@@ -51,7 +59,7 @@ Problemas priorizados
 
 ---
 
-### Escopo
+### Escopo (incluso e fora de escopo)
 
 Incluso
 - Cadastro, listagem, edição e remoção de webhooks por cliente via API ([09:31] Marcos, [09:33] Bruno)
@@ -143,7 +151,7 @@ O usuário remove um webhook e ele deixa de receber notificações.
 - O sistema remove o webhook e para de gerar notificações para ele
 
 **Fluxos alternativos e exceções**
-- O histórico de entregas do webhook removido é preservado **[HIPÓTESE]**
+- Para só pausar o envio sem remover, o usuário desativa o webhook pela edição (FR-003), usando o estado ativo do cadastro ([09:21] Bruno)
 
 **Erros previstos**
 - Webhook inexistente retorna erro `WEBHOOK_NOT_FOUND`
@@ -239,7 +247,7 @@ Um ADMIN recoloca uma notificação da DLQ para nova entrega.
 - O sistema registra quem fez o reprocessamento ([09:36] Sofia)
 
 **Fluxos alternativos e exceções**
-- Item já reprocessado é recusado **[HIPÓTESE]**
+- Se o cliente continuar fora do ar, a notificação reprocessada volta ao ciclo normal de tentativas, porque o replay a recoloca como pendente ([09:18] Diego)
 
 **Erros previstos**
 - Usuário sem role ADMIN é recusado ([09:36] Sofia, [09:36] Larissa)
@@ -278,7 +286,7 @@ Performance
 Disponibilidade
 - Indisponibilidade de um cliente não afeta a mudança de status nem os demais clientes ([09:04] Bruno)
 - O processo de envio roda separado da API e não cai quando a API reinicia ([09:11] Diego)
-- **[HIPÓTESE]** 99,9% de disponibilidade mensal do processo de envio, default do prompt para sistemas voltados a cliente externo; meta não discutida na reunião
+- Nenhuma meta percentual de uptime foi definida na reunião; a garantia acordada é que eventos não se perdem enquanto o worker estiver parado, porque ficam na outbox ([09:06] Diego)
 
 Segurança e autorização
 - Assinatura HMAC-SHA256 do conteúdo enviado ([09:20] Sofia, [09:22] Sofia)
@@ -293,7 +301,6 @@ Observabilidade
 - Histórico de entregas consultável pelo cliente ([09:34] Marcos)
 - Logs estruturados no logger já usado pelo projeto (Pino) ([09:29] Bruno)
 - Registro de quem reprocessou cada item da DLQ ([09:36] Sofia)
-- Indicadores de atraso, sucesso e DLQ detalhados no [FDD](FDD.md) **[HIPÓTESE]**
 
 Confiabilidade e integridade de dados
 - Mudança de status e registro da notificação são atômicos ([09:06] Diego, [09:40] Bruno)
@@ -330,7 +337,7 @@ Integrações
 - Endpoints HTTPS dos clientes recebem as notificações ([09:23] Sofia)
 - Portal de desenvolvedor documenta assinatura, deduplicação e contrato ([09:26] Marcos)
 
-### Decisões e trade-offs
+### Decisões e trade-offs principais
 
 #### Decisão: outbox no MySQL existente ([ADR-001](adrs/ADR-001-outbox-no-mysql.md))
 - **Justificativa:** garante que mudança de status e notificação andem juntas, sem subir infraestrutura nova para um time pequeno ([09:06] Diego, [09:07] Diego)
@@ -393,32 +400,15 @@ Sessão de revisão do desenho com Bruno e Diego antes do início da codificaç�
   - Escopo enxuto, com email, dashboard e rate limiting fora desta fase ([09:37] Larissa, [09:40] Larissa, [09:39] Larissa)
   - Estimativa de 3 sprints com a revisão de segurança já incluída ([09:46] Larissa, [09:47] Larissa)
   - Marcos confirma o prazo com a Atlas ([09:47] Marcos)
-- **Plano de contingência:** priorizar a entrega para a Atlas e negociar com os demais clientes a liberação em sequência **[HIPÓTESE]**
+- **Plano de contingência:** Marcos, que é o ponto de contato com os clientes, comunica qualquer desvio de prazo à Atlas assim que ele for identificado ([09:47] Marcos, [09:49] Marcos)
 
-#### Cliente não descarta eventos repetidos e processa a mesma mudança duas vezes
+#### Clientes não se adaptam à entrega duplicada e processam a mesma mudança duas vezes
 - **Probabilidade:** media
-- **Impacto:** ação duplicada no sistema do cliente, com impacto na percepção de confiabilidade
+- **Impacto:** ação duplicada no sistema do cliente e percepção de que a integração não é confiável ([09:25] Sofia)
 - **Mitigação:**
-  - Identificador único e estável por evento, inclusive no reprocessamento ([09:25] Diego)
   - Explicação em destaque no portal de desenvolvedor ([09:26] Marcos)
+  - Identificador único por evento, padrão que os clientes já conhecem de Stripe e GitHub ([09:25] Diego)
 - **Plano de contingência:** usar o histórico de entregas para mostrar ao cliente quais eventos foram reenviados ([09:34] Marcos)
-
-#### Vazamento da secret de um cliente
-- **Probabilidade:** media (já aconteceu com um cliente, [09:22] Diego)
-- **Impacto:** terceiros conseguem forjar notificações para aquele cliente
-- **Mitigação:**
-  - Secret única por webhook ([09:21] Sofia)
-  - Rotação com 24 horas de convivência ([09:21] Sofia)
-  - Revisão de segurança antes do deploy ([09:46] Sofia)
-- **Plano de contingência:** rotação imediata e desativação do webhook até o cliente atualizar seus sistemas
-
-#### Rajada de mudanças de status sobrecarrega o endpoint do cliente
-- **Probabilidade:** baixa
-- **Impacto:** cliente recebe muitas chamadas em pouco tempo, por exemplo 50 em um minuto ([09:38] Diego)
-- **Mitigação:**
-  - Observar o comportamento em produção ([09:39] Larissa)
-  - Filtro de status reduz o volume enviado ([09:33] Marcos)
-- **Plano de contingência:** implementar rate limiting de saída, registrado como questão em aberto no [RFC](RFC.md)
 
 #### Cliente fica fora do ar por mais de 15 horas
 - **Probabilidade:** baixa
@@ -450,7 +440,7 @@ Checklist objetivo que define se a feature está pronta.
 
 ---
 
-### Testes e validação
+### Estratégia de testes e validação
 
 Tipos de teste obrigatórios
 - Testes unitários para assinatura HMAC, cálculo dos intervalos de retry, filtro de status e limite de 64 KB
@@ -462,5 +452,5 @@ Tipos de teste obrigatórios
 Estratégia de validação
 - Revisão do desenho com Bruno e Diego antes de começar a codar ([09:50] Larissa)
 - Testes automatizados com Vitest e Supertest, no padrão já usado em `tests/orders.test.ts`
-- Validação ponta a ponta com um endpoint de teste recebendo as notificações e verificando assinatura e deduplicação **[HIPÓTESE]**
+- Testes ponta a ponta da integração com `order.service` dentro da estimativa de 3 sprints ([09:46] Larissa)
 - Liberação para Atlas, MaxDistribuição e Nova Cargo com acompanhamento do histórico de entregas e da DLQ

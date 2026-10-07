@@ -1,5 +1,7 @@
 # RFC: Sistema de Webhooks de Notificação de Pedidos
 
+## Metadados
+
 | Campo | Valor |
 |---|---|
 | **Autor** | Larissa (Tech Lead) |
@@ -101,14 +103,16 @@ Usar trigger do MySQL para reagir à inserção, no estilo `NOTIFY/LISTEN` do Po
 **Impacto nos clientes**
 - Precisam expor um endpoint `https`, validar `X-Signature` e deduplicar por `X-Event-Id`. Marcos documenta isso no portal de desenvolvedor ([09:26] Marcos, [09:40] Marcos).
 
-**Riscos principais**
+**Riscos de arquitetura**
 
-| Risco | Prob. | Impacto | Mitigação |
+Riscos de negócio estão no [PRD](PRD.md) e riscos de implementação no [FDD](FDD.md).
+
+| Risco | Prob. | Impacto | Mitigação na proposta |
 |---|---|---|---|
-| Clientes não deduplicam e processam eventos repetidos | Média | Ações duplicadas no lado do cliente | Destaque no portal; `event_id` estável inclusive no replay ([09:26] Marcos) |
-| Vazamento de secret de um cliente | Média | Terceiros forjam notificações para aquele endpoint | Secret por endpoint, rotação com grace 24 h, revisão da Sofia ([09:21] Sofia, [09:22] Diego, [09:46] Sofia) |
-| Rajada de eventos de um único cliente | Baixa | Cliente sobrecarregado; fila atrasa | Observar; rate limiting é a Q1 ([09:39] Larissa) |
-| Prazo: Atlas exige fim de novembro | Média | Risco de churn | Estimativa de 3 sprints com revisão de segurança incluída ([09:45] Marcos, [09:46] Larissa) |
+| Transação de `changeStatus`, que já é pesada, fica mais lenta com a escrita na outbox | Baixa | Mudança de status mais lenta para operadores | Só uma inserção por webhook interessado, com filtro na origem ([09:04] Bruno, [09:34] Bruno) |
+| Teto de escala do single-worker: volume cresce e um worker não dá conta | Baixa no curto prazo | Atraso acima de 10 s | Limitação aceita; caminho de evolução já identificado na Q2 ([09:13] Diego) |
+| Vazamento de secret compromete mais de um cliente | Média | Terceiros forjam notificações | Escopo da secret limitado a um endpoint e rotação com grace de 24 h ([09:21] Sofia, [09:22] Diego) |
+| Rajada de eventos de um único cliente | Baixa | Cliente sobrecarregado; outros clientes atrasam | Observar em produção; rate limiting é a Q1 ([09:38] Diego, [09:39] Larissa) |
 
 ## 7. Decisões relacionadas
 

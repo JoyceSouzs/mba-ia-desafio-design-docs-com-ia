@@ -168,7 +168,7 @@ model WebhookDeadLetter {
 Origem dos campos:
 - `webhook_endpoints`: url, secret, customer_id, estado ativo ([09:21] Bruno); lista de status ([09:31] Marcos, [09:33] Marcos); secret anterior e expiração para o grace period ([09:21] Sofia).
 - `webhook_outbox`: status pendente/processando/falhou/entregue e índices em status e `created_at` ([09:08] Diego); payload snapshot ([09:52] Larissa). **[HIPÓTESE]** `attempts`, `nextAttemptAt` e o índice composto `(status, nextAttemptAt)` são necessários para implementar o backoff com polling.
-- `webhook_deliveries`: sucesso/falha, payload, resposta, tempo de resposta ([09:34] Marcos). **[HIPÓTESE]** `responseBody` armazenado limitado a 4 KB.
+- `webhook_deliveries`: sucesso/falha, payload, resposta, tempo de resposta ([09:34] Marcos).
 - `webhook_dead_letter`: payload, motivo da falha, timestamp ([09:18] Diego); quem fez o replay ([09:36] Sofia).
 
 Na DLQ a linha da outbox fica com `status = FAILED` e ganha uma linha em `webhook_dead_letter`. O replay reaproveita a mesma linha da outbox, o que preserva o `event_id` (ver [ADR-005](adrs/ADR-005-at-least-once-com-x-event-id.md)).
@@ -250,9 +250,9 @@ São consideradas falha:
 
 #### 4.5 Fluxo de DLQ e replay
 
-1. Na 6ª falha, em uma transação do worker: `webhook_outbox.status = FAILED`, `lastErrorCode` preenchido e `webhook_dead_letter` recebe payload, `failureReason` e `failedAt` ([09:18] Diego).
+1. Na 6ª falha, em uma transação do worker: `webhook_outbox.status = FAILED`, `lastErrorCode` preenchido e `webhook_dead_letter` recebe payload, `failureReason` e `failedAt` ([09:18] Diego). Como `outboxId` é único na DLQ, um evento que falha de novo depois de um replay faz upsert na mesma linha: atualiza `failureReason` e `failedAt` e limpa `replayedAt`/`replayedById`.
 2. O ADMIN chama `POST /api/v1/admin/webhooks/dead-letter/:id/replay` ([09:35] Diego), que passa por `authenticate` + `requireRole('ADMIN')` ([09:36] Larissa).
-3. Em transação: valida que a linha existe e não foi reprocessada; volta a outbox para `status = PENDING`, `attempts = 0`, `nextAttemptAt = now()`; grava `replayedAt` e `replayedById` ([09:18] Diego, [09:36] Sofia).
+3. Em transação: valida que a linha existe e que o evento da outbox está em `FAILED` (senão, `WEBHOOK_DEAD_LETTER_NOT_FOUND`); volta a outbox para `status = PENDING`, `attempts = 0`, `nextAttemptAt = now()`; grava `replayedAt` e `replayedById` ([09:18] Diego, [09:36] Sofia).
 4. Loga `webhook_dlq_replayed` com o id do ADMIN ([09:36] Sofia).
 5. O worker pega o evento no próximo ciclo, com o **mesmo `event_id`**.
 
@@ -326,8 +326,9 @@ O valor `secret` **nunca** aparece em respostas, exceto na criação e na rotaç
   - 400 `VALIDATION_ERROR`: `customerId` ausente ou inválido
 
 **Exemplo de requisição**
-```json
-{}
+```http
+GET /api/v1/webhooks?customerId=6f1c2a7e-3b0d-4d8e-9a51-2c7f0e9b1a10&page=1&pageSize=20
+Authorization: Bearer <jwt>
 ```
 
 **Exemplo de resposta (200)**
@@ -385,13 +386,14 @@ O valor `secret` **nunca** aparece em respostas, exceto na criação e na rotaç
 - **[HIPÓTESE]** remoção lógica (`deletedAt = now()`, `active = false`) para preservar o histórico de entregas e as FKs de outbox e deliveries. Webhooks removidos somem da listagem e passam a responder `WEBHOOK_NOT_FOUND`; já `PATCH active=false` só pausa o envio.
 
 **Exemplo de requisição**
-```json
-{}
+```http
+DELETE /api/v1/webhooks/b2d7c9e4-1f3a-4c6b-8e2d-5a9f0c1b7e33
+Authorization: Bearer <jwt>
 ```
 
 **Exemplo de resposta (204)**
-```json
-{}
+```http
+HTTP/1.1 204 No Content
 ```
 
 **5.5 Rotacionar secret**
@@ -401,11 +403,12 @@ O valor `secret` **nunca** aparece em respostas, exceto na criação e na rotaç
 - Semântica de status/headers:
   - 200: nova secret e expiração da anterior
   - 404 `WEBHOOK_NOT_FOUND`
-  - 409 `WEBHOOK_ROTATION_IN_PROGRESS` **[HIPÓTESE]**: já existe secret anterior ainda válida (evita três secrets simultâneas)
+- O modelo guarda uma única secret anterior. Uma nova rotação dentro das 24 h faz a secret corrente virar a anterior, e a mais antiga deixa de valer na hora. Nunca há mais de duas secrets válidas.
 
 **Exemplo de requisição**
-```json
-{}
+```http
+POST /api/v1/webhooks/b2d7c9e4-1f3a-4c6b-8e2d-5a9f0c1b7e33/rotate-secret
+Authorization: Bearer <jwt>
 ```
 
 **Exemplo de resposta (200)**
@@ -426,8 +429,9 @@ O valor `secret` **nunca** aparece em respostas, exceto na criação e na rotaç
   - 404 `WEBHOOK_NOT_FOUND`
 
 **Exemplo de requisição**
-```json
-{}
+```http
+GET /api/v1/webhooks/b2d7c9e4-1f3a-4c6b-8e2d-5a9f0c1b7e33/deliveries
+Authorization: Bearer <jwt>
 ```
 
 **Exemplo de resposta (200)**
@@ -460,12 +464,12 @@ O valor `secret` **nunca** aparece em respostas, exceto na criação e na rotaç
 - Semântica de status/headers:
   - 202: evento recolocado na outbox como `PENDING`; a entrega acontece de forma assíncrona
   - 403 `FORBIDDEN`: usuário sem role ADMIN (`ForbiddenError` existente)
-  - 404 `WEBHOOK_DEAD_LETTER_NOT_FOUND`
-  - 409 `WEBHOOK_DEAD_LETTER_ALREADY_REPLAYED` **[HIPÓTESE]**
+  - 404 `WEBHOOK_DEAD_LETTER_NOT_FOUND`: id inexistente, ou item que não está mais na DLQ (já reprocessado e ainda não falhou de novo)
 
 **Exemplo de requisição**
-```json
-{}
+```http
+POST /api/v1/admin/webhooks/dead-letter/7c1e9a3b-2d4f-4b8e-a6c0-1f5d3e9b2a84/replay
+Authorization: Bearer <jwt de um usuário ADMIN>
 ```
 
 **Exemplo de resposta (202)**
@@ -547,9 +551,7 @@ Todos os erros da API estendem `AppError` (`src/shared/errors/app-error.ts`) e s
 | `WEBHOOK_INVALID_URL` | 400 | API | URL mal formada ou não https | Zod rejeita; ver nota 1 | [09:23] Sofia, [09:28] Bruno |
 | `WEBHOOK_INVALID_EVENTS` | 400 | API | `events` vazio ou com status fora de `OrderStatus` | Zod rejeita; ver nota 1 | [09:33] Marcos |
 | `WEBHOOK_CUSTOMER_NOT_FOUND` | 404 | API | `customerId` inexistente no cadastro | Retorna erro | [09:21] Bruno |
-| `WEBHOOK_ROTATION_IN_PROGRESS` | 409 | API | rotação pedida com secret anterior ainda no grace period | Retorna erro **[HIPÓTESE]** | [09:21] Sofia |
-| `WEBHOOK_DEAD_LETTER_NOT_FOUND` | 404 | API | `:id` inexistente na DLQ | Retorna erro | [09:35] Diego |
-| `WEBHOOK_DEAD_LETTER_ALREADY_REPLAYED` | 409 | API | replay de item já reprocessado | Retorna erro **[HIPÓTESE]** | [09:18] Diego |
+| `WEBHOOK_DEAD_LETTER_NOT_FOUND` | 404 | API | `:id` inexistente na DLQ ou evento que não está mais em `FAILED` | Retorna erro | [09:35] Diego |
 | `WEBHOOK_SECRET_REQUIRED` | n/a | Worker | endpoint sem secret no momento do envio (dado inconsistente) | Não envia; DLQ sem retry | [09:28] Bruno, [09:21] Sofia |
 | `WEBHOOK_PAYLOAD_TOO_LARGE` | n/a | Worker | corpo serializado > 64 KB | Não envia; DLQ sem retry | [09:23] Sofia, [09:24] Larissa |
 | `WEBHOOK_ENDPOINT_INACTIVE` | n/a | Worker | endpoint desativado ou removido após o enfileiramento | Não envia; evento encerrado sem retry **[HIPÓTESE]** | [09:21] Bruno |
@@ -610,7 +612,7 @@ O projeto já tem logs Pino estruturados (`src/shared/logger/index.ts`) e `reque
 Cardinalidade: sem `order_id` nem `event_id` como label; `webhook_id` apenas em consultas pontuais.
 
 **Logs**
-- Formato: JSON Pino com `service`, `env` e `time` ISO (config existente). O worker cria o logger com `base.service = 'order-management-worker'` **[HIPÓTESE]** para separar as fontes.
+- Formato: JSON Pino com `service`, `env` e `time` ISO (config existente). O worker importa o mesmo `logger`; as mensagens com prefixo `webhook_`/`worker_` identificam a origem.
 - Eventos (mensagem em snake_case, como `server_started` e `http_request` já usados):
 
 | Mensagem | Nível | Campos | Origem |
@@ -687,35 +689,28 @@ Equipes e pessoas:
 
 ### 10. Riscos e mitigação
 
-### R1. Cliente não deduplica e processa o mesmo evento duas vezes
+Aqui ficam só os riscos de implementação. Riscos de negócio estão no [PRD](PRD.md) e riscos de arquitetura no [RFC](RFC.md).
 
-- **Probabilidade:** média
-- **Impacto:** efeito duplicado no sistema do cliente (ex.: duas baixas de expedição)
+### R1. Secret exposta em logs ou em respostas da API
+
+- **Probabilidade:** média (um cliente já vazou secret em log, [09:22] Diego)
+- **Impacto:** quem tiver acesso aos logs consegue forjar notificações para o endpoint
 - **Mitigação:**
-    - `X-Event-Id` estável inclusive em retry e replay ([09:25] Diego)
-    - Destaque no portal de desenvolvedor ([09:26] Marcos)
-- **Plano de contingência:** usar `webhook_deliveries` para mostrar ao cliente quais `event_id` foram reenviados e quando.
+    - Incluir `*.secret`, `*.previousSecret` e `req.headers["x-signature"]` em `redactPaths` de `src/shared/logger/index.ts`
+    - Serializers do módulo omitem `secret` em toda resposta, exceto criação e rotação
+    - Critério de aceite específico e revisão de segurança da Sofia ([09:46] Sofia)
+- **Plano de contingência:** rotação imediata da secret afetada ([09:21] Sofia) e `PATCH active=false` até o cliente atualizar.
 
-### R2. Vazamento de secret
-
-- **Probabilidade:** média (já aconteceu, [09:22] Diego)
-- **Impacto:** terceiros forjam notificações para um endpoint
-- **Mitigação:**
-    - Secret por endpoint, nunca global ([09:21] Sofia)
-    - Redact de `secret`/`previousSecret` no Pino
-    - Revisão de segurança da geração de secret e do HMAC ([09:46] Sofia)
-- **Plano de contingência:** rotação imediata pelo cliente; em caso grave, desativar o endpoint via `PATCH active=false`.
-
-### R3. Quebra de ordem quando um evento entra em retry
+### R2. Quebra de ordem quando um evento entra em retry
 
 - **Probabilidade:** média
 - **Impacto:** cliente recebe SHIPPED antes de PROCESSING, enquanto PROCESSING aguarda backoff
 - **Mitigação:**
     - Documentar como limitação conhecida, junto com a ordem por `order_id` apenas ([09:13] Larissa)
-    - Payload traz `from_status`, `to_status` e `timestamp`, permitindo ao cliente descartar eventos antigos
-- **Plano de contingência:** **[HIPÓTESE]** bloquear o envio de eventos de um par (webhook, pedido) enquanto houver evento anterior pendente; decisão para a revisão com Bruno e Diego.
+    - Payload traz `from_status`, `to_status` e `timestamp`, permitindo ao cliente descartar eventos antigos ([09:43] Diego)
+- **Plano de contingência:** **[HIPÓTESE]** bloquear o envio de eventos de um par (webhook, pedido) enquanto houver evento anterior pendente; decisão para a revisão com Bruno e Diego ([09:50] Larissa).
 
-### R4. Crescimento da outbox degrada o polling
+### R3. Crescimento da outbox degrada o polling
 
 - **Probabilidade:** baixa no curto prazo
 - **Impacto:** consultas do worker mais lentas e atraso nas entregas ([09:07] Bruno)
@@ -725,16 +720,7 @@ Equipes e pessoas:
     - Alerta de idade do pendente mais antigo
 - **Plano de contingência:** antecipar o arquivamento de linhas entregues, hoje fora de escopo ([09:08] Diego).
 
-### R5. Rajada de eventos de um único cliente
-
-- **Probabilidade:** baixa
-- **Impacto:** cliente sobrecarregado e outros clientes atrasados, porque o worker é sequencial ([09:38] Diego)
-- **Mitigação:**
-    - Timeout de 10 s limita o tempo perdido por chamada
-    - Métrica de backlog e de duração por webhook
-- **Plano de contingência:** implementar rate limiting de saída, hoje em aberto ([09:39] Larissa).
-
-### R6. Worker parado sem ninguém perceber
+### R4. Worker parado sem ninguém perceber
 
 - **Probabilidade:** média
 - **Impacto:** nenhuma notificação sai, mas a API segue normal
@@ -742,6 +728,15 @@ Equipes e pessoas:
     - Processo separado com restart independente ([09:11] Diego)
     - Alerta de pendente mais antigo > 60 s
 - **Plano de contingência:** reiniciar o worker; os eventos continuam na outbox e nada se perde ([09:06] Diego).
+
+### R5. Reenvio após crash do worker no meio de um lote
+
+- **Probabilidade:** baixa
+- **Impacto:** eventos já entregues voltam para `PENDING` no restart e são reenviados
+- **Mitigação:**
+    - O reenvio usa o mesmo `X-Event-Id`, e o cliente deduplica ([09:25] Diego)
+    - Lote pequeno limita quantos eventos podem ser reenviados
+- **Plano de contingência:** comportamento aceito pela garantia at-least-once ([09:24] Diego); nenhuma ação adicional.
 
 ---
 
